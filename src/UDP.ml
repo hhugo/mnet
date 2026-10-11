@@ -93,10 +93,13 @@ type waiter = {
   ; waiter: out Miou.Computation.t
 }
 
+type packet = Ipaddr.t * int * string
+
 type state = {
     readers: (int, waiter list) Hashtbl.t
   ; ipv4: IPv4.t
   ; ipv6: IPv6.t
+  ; pending: (int, packet Queue.t) Hashtbl.t
 }
 
 type error =
@@ -107,11 +110,30 @@ let pp_error ppf = function
   | `Destination_unreachable _ -> Fmt.string ppf "Destination unreachable"
   | `Packet_too_big -> Fmt.string ppf "Packet too big"
 
-let create ipv4 ipv6 = { readers= Hashtbl.create 0x7ff; ipv4; ipv6 }
+let max_pending = 256
+
+let create ipv4 ipv6 =
+  { readers= Hashtbl.create 0x7ff; pending= Hashtbl.create 0x7ff; ipv4; ipv6 }
+
+let bind state ~port =
+  if not (Hashtbl.mem state.pending port) then
+    Hashtbl.add state.pending port (Queue.create ())
+
+let unbind state ~port = Hashtbl.remove state.pending port
 
 let fill state ~peer ~pkt payload =
   match Hashtbl.find state.readers pkt.Packet.dst_port with
-  | exception Not_found -> ()
+  | exception Not_found ->
+      begin match Hashtbl.find_opt state.pending pkt.Packet.dst_port with
+      | Some queue when Queue.length queue < max_pending ->
+          let data = SBstr.to_string payload in
+          Queue.push (peer, pkt.Packet.src_port, data) queue
+      | Some _ ->
+          Log.warn (fun m ->
+              m "Too many pending datagrams on port %d, drop one from %a:%d"
+                pkt.Packet.dst_port Ipaddr.pp peer pkt.Packet.src_port)
+      | None -> ()
+      end
   | waiters ->
       let fn { buf; dst_off; len; waiter } =
         let length = Int.min len (SBstr.length payload) in
@@ -155,31 +177,43 @@ let recvfrom state ?src:_ ~port ?(off = 0) ?len ?trigger buf =
   let len = match len with Some len -> len | None -> Bytes.length buf - off in
   if off < 0 || len < 0 || off > Bytes.length buf - len then
     invalid_arg "UDP.recvfrom: out of bounds";
-  let waiter = Miou.Computation.create () in
-  let attach t = ignore (Miou.Computation.try_attach waiter t) in
-  Option.iter attach trigger;
-  let waiter = { buf; dst_off= off; len; waiter } in
-  (* NOTE(dinosaure): [finally] is required if we would like to cancel the
-     task which perform this function. In that case, we must clean-up our
-     internal [state.readers] to be sure that we don't have a memory-leak. *)
-  let finally () =
-    let waiters = Hashtbl.find_opt state.readers port in
-    let waiters = Option.value ~default:[] waiters in
-    match List.filter (( != ) waiter) waiters with
-    | [] -> Hashtbl.remove state.readers port
-    | waiters -> Hashtbl.replace state.readers port waiters
-  in
-  match Hashtbl.find state.readers port with
-  | exception Not_found ->
-      Hashtbl.add state.readers port [ waiter ];
-      Fun.protect ~finally @@ fun () ->
-      let { length; peer; port } = Miou.Computation.await_exn waiter.waiter in
-      (length, (peer, port))
-  | waiters ->
-      Hashtbl.replace state.readers port (waiter :: waiters);
-      Fun.protect ~finally @@ fun () ->
-      let { length; peer; port } = Miou.Computation.await_exn waiter.waiter in
-      (length, (peer, port))
+  match Hashtbl.find_opt state.pending port with
+  | Some queue when not (Queue.is_empty queue) ->
+      let peer, src_port, data = Queue.pop queue in
+      let length = Int.min len (String.length data) in
+      Bytes.blit_string data 0 buf off length;
+      (length, (peer, src_port))
+  | _ -> begin
+      let waiter = Miou.Computation.create () in
+      let attach t = ignore (Miou.Computation.try_attach waiter t) in
+      Option.iter attach trigger;
+      let waiter = { buf; dst_off= off; len; waiter } in
+      (* NOTE(dinosaure): [finally] is required if we would like to cancel the
+         task which perform this function. In that case, we must clean-up our
+         internal [state.readers] to be sure that we don't have a memory-leak. *)
+      let finally () =
+        let waiters = Hashtbl.find_opt state.readers port in
+        let waiters = Option.value ~default:[] waiters in
+        match List.filter (( != ) waiter) waiters with
+        | [] -> Hashtbl.remove state.readers port
+        | waiters -> Hashtbl.replace state.readers port waiters
+      in
+      match Hashtbl.find state.readers port with
+      | exception Not_found ->
+          Hashtbl.add state.readers port [ waiter ];
+          Fun.protect ~finally @@ fun () ->
+          let { length; peer; port } =
+            Miou.Computation.await_exn waiter.waiter
+          in
+          (length, (peer, port))
+      | waiters ->
+          Hashtbl.replace state.readers port (waiter :: waiters);
+          Fun.protect ~finally @@ fun () ->
+          let { length; peer; port } =
+            Miou.Computation.await_exn waiter.waiter
+          in
+          (length, (peer, port))
+    end
 
 let sendto state ~dst ?src_port ~port:dst_port ?(off = 0) ?len payload =
   let len =
