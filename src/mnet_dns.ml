@@ -208,7 +208,7 @@ module Transport = struct
             Ring.shift ke (len + 2);
             go ()
           end
-          else
+          else if len < 2 then
             let max = String.length str - 2 in
             Ring.shift ke (2 + Int.min len max)
       | _ -> ()
