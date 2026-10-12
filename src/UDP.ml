@@ -93,13 +93,40 @@ type waiter = {
   ; waiter: out Miou.Computation.t
 }
 
-type packet = Ipaddr.t * int * string
+module Pending = struct
+  type packet = Ipaddr.t * int * string
+  type t = { queue: packet Queue.t; mutable weight: int; capacity: int }
+
+  let create capacity =
+    let queue = Queue.create () and weight = 0 in
+    { queue; weight; capacity }
+
+  let add ~dst_port ((_, _, str) as packet) t =
+    if String.length str > 0 then begin
+      while t.weight + String.length str > t.capacity do
+        let ipaddr, src_port, str = Queue.pop t.queue in
+        t.weight <- t.weight - String.length str;
+        Log.warn (fun m ->
+            m "Too may pending datagrams on port %d, drop one from %a:%d"
+              dst_port Ipaddr.pp ipaddr src_port)
+      done;
+      Queue.push packet t.queue;
+      t.weight <- t.weight + String.length str
+    end
+
+  let is_empty t = Queue.is_empty t.queue
+
+  let pop t =
+    let ((_, _, str) as packet) = Queue.pop t.queue in
+    t.weight <- t.weight - String.length str;
+    packet
+end
 
 type state = {
     readers: (int, waiter list) Hashtbl.t
   ; ipv4: IPv4.t
   ; ipv6: IPv6.t
-  ; pending: (int, packet Queue.t) Hashtbl.t
+  ; pending: (int, Pending.t) Hashtbl.t
 }
 
 type error =
@@ -110,14 +137,12 @@ let pp_error ppf = function
   | `Destination_unreachable _ -> Fmt.string ppf "Destination unreachable"
   | `Packet_too_big -> Fmt.string ppf "Packet too big"
 
-let max_pending = 256
-
 let create ipv4 ipv6 =
   { readers= Hashtbl.create 0x7ff; pending= Hashtbl.create 0x7ff; ipv4; ipv6 }
 
-let bind state ~port =
+let bind ?(capacity = 0x10000) state ~port =
   if not (Hashtbl.mem state.pending port) then
-    Hashtbl.add state.pending port (Queue.create ())
+    Hashtbl.add state.pending port (Pending.create capacity)
 
 let unbind state ~port = Hashtbl.remove state.pending port
 
@@ -125,13 +150,11 @@ let fill state ~peer ~pkt payload =
   match Hashtbl.find state.readers pkt.Packet.dst_port with
   | exception Not_found ->
       begin match Hashtbl.find_opt state.pending pkt.Packet.dst_port with
-      | Some queue when Queue.length queue < max_pending ->
+      | Some pending ->
           let data = SBstr.to_string payload in
-          Queue.push (peer, pkt.Packet.src_port, data) queue
-      | Some _ ->
-          Log.warn (fun m ->
-              m "Too many pending datagrams on port %d, drop one from %a:%d"
-                pkt.Packet.dst_port Ipaddr.pp peer pkt.Packet.src_port)
+          Pending.add ~dst_port:pkt.Packet.dst_port
+            (peer, pkt.Packet.src_port, data)
+            pending
       | None -> ()
       end
   | waiters ->
@@ -178,8 +201,8 @@ let recvfrom state ?src:_ ~port ?(off = 0) ?len ?trigger buf =
   if off < 0 || len < 0 || off > Bytes.length buf - len then
     invalid_arg "UDP.recvfrom: out of bounds";
   match Hashtbl.find_opt state.pending port with
-  | Some queue when not (Queue.is_empty queue) ->
-      let peer, src_port, data = Queue.pop queue in
+  | Some pending when not (Pending.is_empty pending) ->
+      let peer, src_port, data = Pending.pop pending in
       let length = Int.min len (String.length data) in
       Bytes.blit_string data 0 buf off length;
       (length, (peer, src_port))
