@@ -2,7 +2,7 @@
 
 - Drop invalid DNS packets when its len is less than 2 (@dinosaure, [!88][88])
 - Add `UDP.{un,}bind` to keep UDP packet even if we don't to `recvfrom`
-  (@dinosaure, [!89][89])
+  (@dinosaure, @hannesm, [!89][89])
 
 [88]: https://git.robur.coop/robur/mnet/pulls/88
 [89]: https://git.robur.coop/robur/mnet/pulls/89
