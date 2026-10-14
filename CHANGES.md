@@ -1,3 +1,12 @@
+### v0.0.9 (2026-10-14)
+
+- Drop invalid DNS packets when its len is less than 2 (@dinosaure, [!88][88])
+- Add `UDP.{un,}bind` to keep UDP packet even if we don't to `recvfrom`
+  (@dinosaure, @hannesm, [!89][89])
+
+[88]: https://git.robur.coop/robur/mnet/pulls/88
+[89]: https://git.robur.coop/robur/mnet/pulls/89
+
 ### v0.0.8 (2026-10-07)
 
 - Upgrade to `utcp.0.0.8` (@dinosaure, [!70][70])
