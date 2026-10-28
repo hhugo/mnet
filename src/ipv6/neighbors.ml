@@ -200,10 +200,13 @@ let transition ~mac key (state, is_router) now event =
         let action = Some (Packet pkt) in
         (Some (Probe { lladdr; expire_at; sent_probes }, is_router), action)
       end
-  (* 2. Unrelated events: an NA only concerns the entry of its target, the
-     other entries are left unchanged (their timers, above, still run). *)
+  (* 2. Unrelated events: an NA only concerns the entry of its target, and an
+     NS (RFC 4861 7.2.3) the entry of its source; the other entries are left
+     unchanged (their timers, above, still run). *)
   | _, `NA (_src, _dst, { NA.target; _ }) when Ipaddr.V6.compare key target <> 0
     ->
+      (Some (state, is_router), None)
+  | _, `NS (src, _dst, _) when Ipaddr.V6.compare key src <> 0 ->
       (Some (state, is_router), None)
   (* 3. The state machine (RFC 4861, Appendix C), for an NA or NS about this
      entry. *)
@@ -309,24 +312,19 @@ let transition ~mac key (state, is_router) now event =
      link-layer address differs from the one in the received Source Link-Layer
      option, the cached address should be replaced by the received address, and
      the entry's reachability state MUST be set to STALE. *)
-  | Incomplete _, `NS (src, _dst, { NS.slla= Some lladdr; _ }) ->
-      if Ipaddr.V6.compare key src = 0 then
-        let state = Stale lladdr in
-        (Some (state, is_router), Some (Release_with (key, lladdr)))
-      else
-        let state = Stale lladdr in
-        (Some (state, false), None)
+  | Incomplete _, `NS (_src, _dst, { NS.slla= Some lladdr; _ }) ->
+      (* [key] is the source of the NS (see above). *)
+      let state = Stale lladdr in
+      (Some (state, is_router), Some (Release_with (key, lladdr)))
   | ( (Stale _ | Probe _ | Delay _ | Reachable _)
-    , `NS (src, _dst, { NS.slla= Some lladdr; _ }) ) ->
+    , `NS (_src, _dst, { NS.slla= Some lladdr; _ }) ) ->
+      (* [key] is the source of the NS (see above). *)
       let lladdr' = Neighbor.lladdr state in
       let lladdr' = Option.get lladdr' in
-      if Ipaddr.V6.compare key src = 0 && Macaddr.compare lladdr lladdr' <> 0
-      then
+      if Macaddr.compare lladdr lladdr' <> 0 then
         let state = Stale lladdr in
         (Some (state, is_router), None)
-      else
-        let state = Stale lladdr in
-        (Some (state, false), None)
+      else (Some (state, is_router), None)
   | (Incomplete _ | Reachable _ | Delay _ | Probe _ | Stale _), _ ->
       (Some (state, is_router), None)
 
