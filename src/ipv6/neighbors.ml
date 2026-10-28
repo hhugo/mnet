@@ -139,6 +139,8 @@ type action =
 let transition ~mac key (state, is_router) now event =
   let open Neighbor in
   match (state, event) with
+  (* 1. Timers: whatever the event, an entry whose deadline has passed
+     retransmits, expires or is dropped. *)
   (* | INCOMPLETE | Retransmit timeout, | Retransmit NS    | INCOMPLETE
      |            | less than N         | Start retransmit |
      |            | retransmissions.    | timer            |
@@ -198,6 +200,13 @@ let transition ~mac key (state, is_router) now event =
         let action = Some (Packet pkt) in
         (Some (Probe { lladdr; expire_at; sent_probes }, is_router), action)
       end
+  (* 2. Unrelated events: an NA only concerns the entry of its target, the
+     other entries are left unchanged (their timers, above, still run). *)
+  | _, `NA (_src, _dst, { NA.target; _ }) when Ipaddr.V6.compare key target <> 0
+    ->
+      (Some (state, is_router), None)
+  (* 3. The state machine (RFC 4861, Appendix C), for an NA or NS about this
+     entry. *)
   (* | INCOMPLETE | NA, Solicited=1, | Record link-layer    | REACHABLE
      |            | Override=any     | address. Send queued |
      |            |                  | packets.             |
