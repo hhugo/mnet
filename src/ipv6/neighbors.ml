@@ -335,7 +335,7 @@ let tick t ~mac ~now event =
     | Some value', action ->
         let t' = Neighbors.add key value' t' in
         (push action, t')
-    | None, action -> (push action, t)
+    | None, action -> (push action, t')
   in
   (* NOTE(dinosaure): even if we can [fold_k] here (which performs better), we
      would like to keep the usage order to clean up then. *)

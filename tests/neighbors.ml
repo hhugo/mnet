@@ -28,6 +28,9 @@ let na ~target ~tlla =
 
 let tick t ~now event = N.tick t ~mac ~now event
 
+let cancels actions =
+  List.length (List.filter (function N.Cancel _ -> true | _ -> false) actions)
+
 let check name ok =
   if not ok then (
     Printf.printf "FAIL: %s\n" name;
@@ -72,3 +75,16 @@ let () =
   let actions, _ = tick t ~now:(5 * s) `Tick in
   check "router still reachable"
     (not (List.exists (function N.Packet _ -> true | _ -> false) actions))
+
+(* A dropped entry is dropped once, and the other updates are kept. *)
+let () =
+  let t = query (N.make 16) ~now:0 other in
+  let t =
+    List.fold_left (fun t n -> snd (tick t ~now:(n * s) `Tick)) t [ 1; 2; 3 ]
+  in
+  let t = query t ~now:((3 * s) + (s / 2)) host in
+  let actions, t = tick t ~now:(4 * s) (na ~target:host ~tlla:host_mac) in
+  check "unanswered entry cancelled" (cancels actions = 1);
+  check "host resolved in the same tick" (N.lladdr t host = Some host_mac);
+  let actions, _ = tick t ~now:(4 * s) `Tick in
+  check "cancelled only once" (cancels actions = 0)
